@@ -1,0 +1,32 @@
+[Unit]
+Description=Pengosongan payload & unggah rekaman lalu lintas (penelitian TA)
+Documentation=file:///opt/traffic-recorder/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trafficrec
+Group=trafficrec
+EnvironmentFile=/etc/traffic-recorder/config.env
+Environment=TZ=UTC
+Environment=RCLONE_CACHE_DIR=/var/lib/traffic-recorder/.cache
+ExecStart=/opt/traffic-recorder/bin/process_and_upload.sh
+
+# Tanpa hak istimewa sama sekali
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/traffic-recorder
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=30%
+MemoryMax=512M

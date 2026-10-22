@@ -1,0 +1,12 @@
+# Jangan pernah mengunggah kredensial atau data rekaman ke repositori
+rclone.conf
+*.conf
+config.env
+*.pcap
+*.pcap.gz
+*.pcapng
+upload_log.csv
+__pycache__/
+
+# Catatan pribadi peneliti, bukan untuk pihak server
+PANDUAN_SATRIA.md

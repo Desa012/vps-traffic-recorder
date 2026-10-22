@@ -1,0 +1,41 @@
+[Unit]
+Description=Perekam header lalu lintas jaringan (penelitian TA)
+Documentation=file:///opt/traffic-recorder/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trafficrec
+Group=trafficrec
+EnvironmentFile=/etc/traffic-recorder/config.env
+Environment=TZ=UTC
+ExecStart=/opt/traffic-recorder/bin/record.sh
+Restart=on-failure
+RestartSec=30
+# 124 = berhenti normal karena masa perekaman (DURATION_DAYS) habis
+SuccessExitStatus=124
+
+# Hak minimum: hanya boleh membaca paket mentah, tidak ada hak root lain
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+
+# Sandbox: seluruh sistem berkas hanya-baca kecuali folder data
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/traffic-recorder
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+# Batas sumber daya agar tidak mengganggu layanan perusahaan
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=25%
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

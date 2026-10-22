@@ -1,0 +1,2 @@
+# Skrip dijalankan di Linux: paksa akhir baris LF walau dikomit dari Windows
+* text=auto eol=lf
