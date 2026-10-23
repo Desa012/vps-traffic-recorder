@@ -1,10 +1,13 @@
 [Unit]
-Description=Jalankan pengunggah rekaman lalu lintas setiap 15 menit
+Description=Jalankan pengolah & pengunggah rekaman lalu lintas setiap 15 menit
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=15min
+# Jadwal berbasis jam dinding (menit :00, :15, :30, :45). Selalu terjadwal ulang
+# walaupun timer pernah dihentikan lalu dijalankan kembali.
+OnCalendar=*:0/15
+# Bila server mati saat jadwal tiba, jalankan sekali begitu server menyala
 Persistent=true
+AccuracySec=30s
 
 [Install]
 WantedBy=timers.target
