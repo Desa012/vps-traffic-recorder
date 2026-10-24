@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Pemasang perekam lalu lintas.
 #
-#   sudo bash install.sh                       pasang tanpa konfigurasi unggah
-#   sudo bash install.sh /path/ke/rclone.conf  pasang sekaligus konfigurasi unggah
+#   sudo bash install.sh
+#   sudo bash install.sh --url https://penerima/api/v1/upload --token /path/ke/token.txt
+#
+#   --url    alamat endpoint server penerima (disimpan di config.env sebagai UPLOAD_URL)
+#   --token  berkas berisi token unik instalasi ini (disalin ke /var/lib/traffic-recorder/token)
 #
 # Skrip ini TIDAK menjalankan perekaman. Perekaman baru dimulai setelah
 # administrator memeriksa konfigurasi lalu menjalankan perintah systemctl
@@ -20,15 +23,34 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+URL=""; TOKEN_SRC=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --url)   URL="${2:-}"; shift 2 ;;
+        --token) TOKEN_SRC="${2:-}"; shift 2 ;;
+        *) echo "Opsi tidak dikenal: $1"; echo "Pemakaian: sudo bash install.sh [--url URL] [--token BERKAS]"; exit 1 ;;
+    esac
+done
+if [[ -n "$URL" ]] && ! [[ "$URL" =~ ^https://[A-Za-z0-9.:/_~-]+$ ]]; then
+    echo "Ditolak: --url harus diawali https:// dan hanya berisi huruf, angka, serta . : / _ ~ -"; exit 1
+fi
+if [[ -n "$TOKEN_SRC" ]]; then
+    [[ -f "$TOKEN_SRC" ]] || { echo "Berkas token tidak ditemukan: $TOKEN_SRC"; exit 1; }
+    TOKEN=$(tr -d '[:space:]' < "$TOKEN_SRC")
+    if ! [[ "$TOKEN" =~ ^[A-Za-z0-9._~-]{32,}$ ]]; then
+        echo "Ditolak: isi token tidak valid (minimal 32 karakter huruf/angka/-_.~)"; exit 1
+    fi
+fi
+
 # ---------------------------------------------------------------- 1. dependensi
 kurang=()
-for c in tcpdump python3 rclone flock timeout pgrep gzip systemctl; do
+for c in tcpdump python3 curl sha256sum flock timeout pgrep gzip systemctl; do
     command -v "$c" >/dev/null 2>&1 || kurang+=("$c")
 done
 if (( ${#kurang[@]} )); then
     echo "Program berikut belum terpasang: ${kurang[*]}"
-    echo "  Debian/Ubuntu     : apt install tcpdump python3 rclone util-linux coreutils procps gzip"
-    echo "  RHEL/Alma/Rocky   : dnf install epel-release && dnf install tcpdump python3 rclone util-linux coreutils procps-ng gzip"
+    echo "  Debian/Ubuntu     : apt install tcpdump python3 curl util-linux coreutils procps gzip"
+    echo "  RHEL/Alma/Rocky   : dnf install tcpdump python3 curl util-linux coreutils procps-ng gzip"
     exit 1
 fi
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 5) else 1)' \
@@ -60,15 +82,31 @@ if [[ ! -f "$ETC/config.env" ]]; then
 else
     echo "[ok] konfigurasi lama di $ETC/config.env dipertahankan"
 fi
+if [[ -n "$URL" ]]; then
+    if grep -q '^UPLOAD_URL=' "$ETC/config.env"; then
+        sed -i "s|^UPLOAD_URL=.*|UPLOAD_URL=\"$URL\"|" "$ETC/config.env"
+    else
+        printf '\nUPLOAD_URL="%s"\n' "$URL" >> "$ETC/config.env"
+    fi
+    echo "[ok] alamat server penerima: $URL"
+fi
 
-# ---------------------------------------------------------------- 5. folder data
+# ---------------------------------------------------------------- 5. folder data & token
 install -d -m 700 -o "$USR" -g "$USR" "$STATE" "$STATE/spool" "$STATE/outbox"
-if [[ -n "${1:-}" ]]; then
-    install -m 600 -o "$USR" -g "$USR" "$1" "$STATE/rclone.conf"
-    echo "[ok] rclone.conf dipasang di $STATE/rclone.conf (hanya dapat dibaca user $USR)"
+if [[ -n "$TOKEN_SRC" ]]; then
+    printf '%s\n' "$TOKEN" > "$STATE/token.baru"
+    chown "$USR:$USR" "$STATE/token.baru"; chmod 600 "$STATE/token.baru"
+    mv "$STATE/token.baru" "$STATE/token"
+    echo "[ok] token instalasi dipasang di $STATE/token (hanya dapat dibaca user $USR)"
+elif [[ -s "$STATE/token" ]]; then
+    echo "[ok] token instalasi lama dipertahankan"
 else
-    echo "[--] rclone.conf belum dipasang; berkas akan tersimpan lokal sampai dipasang:"
-    echo "     sudo install -m 600 -o $USR -g $USR rclone.conf $STATE/rclone.conf"
+    echo "[--] token belum dipasang; berkas akan tersimpan lokal sampai dipasang:"
+    echo "     sudo bash install.sh --token /path/ke/token.txt"
+fi
+if [[ -f "$STATE/rclone.conf" ]]; then
+    rm -f "$STATE/rclone.conf"
+    echo "[ok] rclone.conf versi lama dihapus (pengiriman kini lewat HTTPS ke server penerima)"
 fi
 
 # ---------------------------------------------------------------- 6. cek antarmuka

@@ -1,5 +1,5 @@
 [Unit]
-Description=Pengosongan payload & unggah rekaman lalu lintas (penelitian TA)
+Description=Pengosongan payload & pengiriman rekaman lalu lintas (penelitian TA)
 Documentation=file:///opt/traffic-recorder/README.md
 After=network-online.target
 Wants=network-online.target
@@ -10,7 +10,6 @@ User=trafficrec
 Group=trafficrec
 EnvironmentFile=/etc/traffic-recorder/config.env
 Environment=TZ=UTC
-Environment=RCLONE_CACHE_DIR=/var/lib/traffic-recorder/.cache
 ExecStart=/opt/traffic-recorder/bin/process_and_upload.sh
 
 # Tanpa hak istimewa sama sekali
@@ -20,11 +19,14 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateDevices=yes
 ReadWritePaths=/var/lib/traffic-recorder
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
+# Hanya jenis soket yang diperlukan untuk koneksi HTTPS keluar
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 Nice=15
 IOSchedulingClass=idle

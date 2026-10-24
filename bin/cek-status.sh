@@ -24,7 +24,7 @@ else
     gagal "perekam TIDAK berjalan — status: $(systemctl is-active traffic-recorder.service)"
 fi
 if systemctl is-active --quiet traffic-uploader.timer; then
-    ok "pengolah & pengunggah aktif (setiap 15 menit)"
+    ok "pengolah & pengirim aktif (setiap 15 menit)"
 else
     gagal "timer pengunggah TIDAK aktif"
 fi
@@ -56,30 +56,42 @@ info "pemakaian disk         : $(du -sh "$STATE" | cut -f1) (batas ${MAX_DISK_MB
 
 echo
 echo "4. PENGIRIMAN"
-if [[ -f "$STATE/rclone.conf" ]]; then
-    ok "rclone.conf terpasang"
+AUDIT="$STATE/audit_log.csv"
+URL=$(sed -n 's/^UPLOAD_URL=//p' "$CONF" | tr -d '"')
+if [[ -n "$URL" ]]; then
+    ok "server penerima: $(sed -E 's#^(https?://[^/]+).*#\1#' <<< "$URL")"
 else
-    info "rclone.conf belum dipasang — berkas disimpan di server dulu"
+    info "UPLOAD_URL belum diisi — berkas disimpan di server dulu"
 fi
-if [[ -s "$STATE/upload_log.csv" ]] && [[ $(wc -l < "$STATE/upload_log.csv") -gt 1 ]]; then
-    terakhir=$(tail -n1 "$STATE/upload_log.csv")
-    case "$terakhir" in
-        *,OK)     ok "unggahan terakhir berhasil: $terakhir" ;;
-        *GAGAL*)  gagal "unggahan terakhir gagal: $terakhir — lihat: journalctl -u traffic-uploader.service -n 30" ;;
-        *)        info "catatan terakhir: $terakhir" ;;
-    esac
+if [[ -s "$STATE/token" ]]; then
+    ok "token instalasi terpasang"
 else
-    info "belum ada unggahan"
+    info "token belum dipasang — berkas disimpan di server dulu"
+fi
+if [[ -s "$AUDIT" ]] && [[ $(wc -l < "$AUDIT") -gt 1 ]]; then
+    sejak=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+    read -r n_ok n_gagal < <(awk -F, -v s="$sejak" 'NR > 1 && $1 >= s {
+        if ($5 == "TERKIRIM") a++; else if ($5 == "GAGAL_KIRIM") b++ } END {print a + 0, b + 0}' "$AUDIT")
+    info "24 jam terakhir: $n_ok berkas terkirim, $n_gagal percobaan gagal"
+    terakhir=$(awk -F, '$5 == "TERKIRIM" || $5 == "GAGAL_KIRIM"' "$AUDIT" | tail -n1)
+    case "$terakhir" in
+        "")           info "belum ada percobaan pengiriman" ;;
+        *,TERKIRIM,*) ok "pengiriman terakhir berhasil: $(cut -d, -f1,2 <<< "$terakhir")" ;;
+        *)            gagal "pengiriman terakhir gagal (HTTP $(cut -d, -f6 <<< "$terakhir")): $(cut -d, -f7 <<< "$terakhir")" ;;
+    esac
+    info "catatan lengkap: sudo cat $AUDIT"
+else
+    info "belum ada catatan audit"
 fi
 
 echo
 echo "5. VERIFIKASI PAYLOAD (berkas terbaru di outbox)"
 F=$(ls -t "$STATE"/outbox/*.hdr.pcap.gz 2>/dev/null | head -n1)
 if [[ -z "$F" ]]; then
-    if (( n_spool > 0 )) && [[ ! -f "$STATE/rclone.conf" || ! -s "$STATE/upload_log.csv" ]]; then
-        info "belum ada berkas hasil — berkas pertama siap ±1 jam setelah perekam dimulai"
-    else
+    if grep -q ',TERKIRIM,' "$AUDIT" 2>/dev/null; then
         info "outbox kosong — semua berkas sudah terkirim"
+    else
+        info "belum ada berkas hasil — berkas pertama siap ±1 jam setelah perekam dimulai"
     fi
 else
     gzip -t "$F" 2>/dev/null && ok "format berkas valid: $(basename "$F")" || gagal "berkas rusak: $(basename "$F")"

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Pengolah & pengunggah. Dijalankan berkala oleh traffic-uploader.timer
+# Pengolah & pengirim. Dijalankan berkala oleh traffic-uploader.timer
 # sebagai user "trafficrec" (tanpa hak istimewa apa pun).
 #
 # 1. Mengosongkan payload setiap berkas rekaman yang sudah selesai ditulis
 # 2. Menjaga total pemakaian disk di bawah MAX_DISK_MB
-# 3. Mengunggah berkas ke Google Drive lewat rclone, lalu menghapus salinan lokal
+# 3. Mengirim setiap berkas ke server penerima lewat HTTPS dengan token per
+#    instalasi; salinan lokal baru dihapus bila penerima membalas checksum yang sama
+# 4. Mencatat setiap kejadian ke audit_log.csv
 set -euo pipefail
 shopt -s nullglob
 export LC_ALL=C     # urutan glob konsisten: cap_YYYYmmdd_HHMMSS urut menurut waktu
@@ -14,16 +16,25 @@ BIN="${BIN_DIR:-/opt/traffic-recorder/bin}"
 SPOOL="$STATE/spool"
 OUTBOX="$STATE/outbox"
 TMPDIR_KERJA="$STATE/tmp"
-LOG="$STATE/upload_log.csv"
-RCLONE_CONF="$STATE/rclone.conf"
+AUDIT="$STATE/audit_log.csv"
+TOKEN_FILE="$STATE/token"
 MAX_DISK_MB="${MAX_DISK_MB:-2048}"
+UPLOAD_URL="${UPLOAD_URL:-}"
+UPLOAD_CA_FILE="${UPLOAD_CA_FILE:-}"
 UPLOAD_BWLIMIT="${UPLOAD_BWLIMIT:-1M}"
-: "${RCLONE_REMOTE:?RCLONE_REMOTE belum diisi di /etc/traffic-recorder/config.env}"
+ALLOW_HTTP="${ALLOW_HTTP:-0}"          # hanya untuk uji lokal
 
 waktu() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# audit NAMA UKURAN SHA256 STATUS KODE_HTTP KETERANGAN
+audit() {
+    local ket="${6:-}"
+    ket="${ket//,/;}"; ket="${ket//$'\n'/ }"; ket="${ket//$'\r'/ }"
+    printf '%s,%s,%s,%s,%s,%s,%s\n' "$(waktu)" "$1" "$2" "$3" "$4" "$5" "$ket" >> "$AUDIT"
+}
+
 mkdir -p "$SPOOL" "$OUTBOX" "$TMPDIR_KERJA"
-[[ -s "$LOG" ]] || echo "mulai_utc,selesai_utc,jumlah_berkas,status" > "$LOG"
+[[ -s "$AUDIT" ]] || echo "waktu_utc,nama_file,ukuran_byte,sha256,status,kode_http,keterangan" > "$AUDIT"
 
 # Cegah dua proses berjalan bersamaan
 exec 9>"$STATE/.lock"
@@ -43,57 +54,104 @@ terbaru=""
 (( ${#semua[@]} )) && terbaru="${semua[${#semua[@]}-1]}"
 
 for f in "${semua[@]}"; do
-    # Berkas terbaru masih ditulis tcpdump selama perekam aktif
     if (( perekam_aktif )) && [[ "$f" == "$terbaru" ]]; then
-        continue
+        continue                         # masih ditulis tcpdump
     fi
     dasar=$(basename "$f" .pcap)
+    hasil="$dasar.hdr.pcap.gz"
     # Ditulis dulu ke folder sementara (nama harus berakhiran .gz agar langsung
     # terkompresi), lalu dipindah ke outbox setelah lengkap.
-    sementara="$TMPDIR_KERJA/$dasar.hdr.pcap.gz"
-    if python3 "$BIN/strip_payload.py" "$f" "$sementara"; then
-        mv "$sementara" "$OUTBOX/$dasar.hdr.pcap.gz"
+    if python3 "$BIN/strip_payload.py" "$f" "$TMPDIR_KERJA/$hasil"; then
+        mv "$TMPDIR_KERJA/$hasil" "$OUTBOX/$hasil"
+        audit "$hasil" "$(stat -c %s "$OUTBOX/$hasil")" \
+              "$(sha256sum "$OUTBOX/$hasil" | cut -d' ' -f1)" SIAP_KIRIM - ""
     else
-        rm -f "$sementara"
-        echo "$(waktu),,0,GAGAL_DIPROSES:$dasar" >> "$LOG"
+        rm -f "$TMPDIR_KERJA/$hasil"
+        audit "$hasil" 0 - GAGAL_DIPROSES - "berkas rekaman rusak"
     fi
-    rm -f "$f"     # berkas mentah selalu dihapus, berhasil maupun gagal
+    rm -f "$f"                           # berkas mentah selalu dihapus
 done
 
 # ---------------------------------------------------------------- 2. batas disk
 batas=$(( MAX_DISK_MB * 1024 * 1024 ))
 pakai=$(du -sb "$SPOOL" "$OUTBOX" | awk '{s += $1} END {print s + 0}')
 if (( pakai > batas )); then
-    for f in $(ls -1tr "$OUTBOX"/*.hdr.pcap.gz 2>/dev/null); do
+    for f in "$OUTBOX"/*.hdr.pcap.gz; do       # urut dari yang tertua
         (( pakai <= batas )) && break
         ukuran=$(stat -c %s "$f")
+        audit "$(basename "$f")" "$ukuran" - DIBUANG_KUOTA - "melebihi MAX_DISK_MB"
         rm -f "$f"
         pakai=$(( pakai - ukuran ))
-        echo "$(waktu),,0,DIBUANG_KUOTA:$(basename "$f")" >> "$LOG"
     done
 fi
 
-# ---------------------------------------------------------------- 3. unggah
+# ---------------------------------------------------------------- 3. kirim
 berkas=("$OUTBOX"/*.hdr.pcap.gz)
 (( ${#berkas[@]} )) || exit 0
 
-if [[ ! -f "$RCLONE_CONF" ]]; then
-    echo "rclone.conf belum dipasang; ${#berkas[@]} berkas disimpan lokal sampai konfigurasi tersedia."
+if [[ -z "$UPLOAD_URL" || ! -s "$TOKEN_FILE" ]]; then
+    echo "UPLOAD_URL atau token belum dipasang; ${#berkas[@]} berkas disimpan lokal sampai tersedia."
     exit 0
 fi
+case "$UPLOAD_URL" in
+    https://*) ;;
+    http://*)
+        if [[ "$ALLOW_HTTP" != "1" ]]; then
+            echo "Ditolak: UPLOAD_URL harus memakai https://"
+            exit 1
+        fi ;;
+    *)  echo "UPLOAD_URL tidak valid: $UPLOAD_URL"; exit 1 ;;
+esac
 
-mulai=$(waktu)
-if rclone --config "$RCLONE_CONF" move "$OUTBOX" "$RCLONE_REMOTE" \
-        --include "*.hdr.pcap.gz" --bwlimit "$UPLOAD_BWLIMIT" --transfers 1 \
-        --retries 3 --low-level-retries 5 --log-level NOTICE; then
-    status=OK
-else
-    status=GAGAL
-fi
-echo "$mulai,$(waktu),${#berkas[@]},$status" >> "$LOG"
-echo "Unggah $status: ${#berkas[@]} berkas"
+# Token ditulis ke berkas header sementara (izin 600) agar tidak terlihat di
+# daftar proses (ps) seperti bila dituliskan langsung sebagai argumen curl.
+umask 077
+HEADER="$TMPDIR_KERJA/auth.header"
+printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' < "$TOKEN_FILE")" > "$HEADER"
+trap 'rm -f "$HEADER" "$TMPDIR_KERJA/balasan.json" "$TMPDIR_KERJA/curl.err"' EXIT
 
-# Catatan waktu unggah ikut dikirim, agar lalu lintas unggahan ini sendiri
-# dapat dikeluarkan dari data saat analisis
-rclone --config "$RCLONE_CONF" copyto "$LOG" "$RCLONE_REMOTE/upload_log.csv" \
-    --log-level ERROR || true
+opsi=(--silent --show-error --connect-timeout 20 --max-time 900
+      --limit-rate "$UPLOAD_BWLIMIT" -H @"$HEADER" -A "vps-traffic-recorder")
+[[ -n "$UPLOAD_CA_FILE" ]] && opsi+=(--cacert "$UPLOAD_CA_FILE")
+[[ "$ALLOW_HTTP" == "1" ]] || opsi+=(--proto "=https")
+
+terkirim=0; gagal=0
+for f in "${berkas[@]}"; do
+    nama=$(basename "$f")
+    ukuran=$(stat -c %s "$f")
+    sha=$(sha256sum "$f" | cut -d' ' -f1)
+    balasan="$TMPDIR_KERJA/balasan.json"
+    rm -f "$balasan" "$TMPDIR_KERJA/curl.err"
+
+    kode=$(curl "${opsi[@]}" -X PUT -o "$balasan" -w '%{http_code}' \
+                -H "Content-Type: application/gzip" -H "X-Content-SHA256: $sha" \
+                --data-binary @"$f" "${UPLOAD_URL%/}/$nama" \
+                2>"$TMPDIR_KERJA/curl.err") || true
+    kode="${kode:-000}"
+
+    # Checksum yang diakui penerima harus sama dengan checksum berkas lokal
+    sha_diterima=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("sha256", ""))
+except Exception: print("")' "$balasan" 2>/dev/null || true)
+
+    if [[ "$kode" =~ ^(200|201|409)$ && "$sha_diterima" == "$sha" ]]; then
+        rm -f "$f"
+        ket=""; [[ "$kode" == "409" ]] && ket="sudah ada di penerima"
+        audit "$nama" "$ukuran" "$sha" TERKIRIM "$kode" "$ket"
+        terkirim=$(( terkirim + 1 ))
+    else
+        if [[ -s "$TMPDIR_KERJA/curl.err" ]]; then
+            ket=$(head -c 200 "$TMPDIR_KERJA/curl.err")
+        elif [[ -n "$sha_diterima" ]]; then
+            ket="checksum balasan tidak cocok"
+        else
+            ket=$(head -c 200 "$balasan" 2>/dev/null || true)
+        fi
+        audit "$nama" "$ukuran" "$sha" GAGAL_KIRIM "$kode" "$ket"
+        gagal=$(( gagal + 1 ))
+        # Token ditolak atau penerima tidak terjangkau: hentikan putaran ini,
+        # berkas tetap aman di outbox dan dicoba lagi pada jadwal berikutnya.
+        [[ "$kode" =~ ^(000|401|403)$ ]] && break
+    fi
+done
+echo "Pengiriman: $terkirim berhasil, $gagal gagal, $(( ${#berkas[@]} - terkirim - gagal )) menunggu"

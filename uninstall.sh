@@ -22,7 +22,7 @@ echo "[ok] layanan dihentikan dan program dihapus"
 if [[ "${1:-}" == "--purge" ]]; then
     rm -rf /etc/traffic-recorder /var/lib/traffic-recorder
     userdel trafficrec 2>/dev/null || true
-    echo "[ok] data, konfigurasi, rclone.conf, dan user trafficrec dihapus"
+    echo "[ok] data, konfigurasi, token, catatan audit, dan user trafficrec dihapus"
 else
     echo "[--] data di /var/lib/traffic-recorder dan konfigurasi di /etc/traffic-recorder dipertahankan"
     echo "     jalankan 'sudo bash uninstall.sh --purge' untuk menghapus semuanya"
